@@ -1,6 +1,6 @@
 ---
 name: video-to-text
-version: 1.2.0
+version: 1.3.0
 description: "将本地会议视频（MP4/M4A/MOV）转换为带时间戳的 Markdown 文字稿。语音识别使用本地 faster-whisper（中文 medium 模型，无需联网），屏幕共享内容（PPT/代码/白板/表格）使用 Claude Vision 分析，两路合并输出。独立工具，不依赖任何其他 skill。当用户说「把这个视频转文字」「录制转文本」「分析这个MP4」「提取屏幕内容」「视频转文字稿」「这个会议有屏幕共享，帮我整理」时触发。会议含屏幕共享演示时最有价值；仅摄像头画面（无共享屏幕讲解）时可跳过。"
 metadata:
   requires:
@@ -53,7 +53,7 @@ pip install -r "$(dirname $0)/requirements.txt"
 echo ${ANTHROPIC_API_KEY:0:10}…
 ```
 
-未设置时屏幕分析会被跳过（仅语音转写）。需要屏幕内容时：
+未设置时屏幕分析默认 `auto` 模式会尝试本地后端（qwen/ocr）；如两者均未安装则跳过屏幕分析，仅输出语音稿。需要 Claude Vision 时：
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-…
 ```
@@ -94,9 +94,19 @@ python3 <SCRIPT_PATH> "<VIDEO_PATH>" [OPTIONS]
 | 选项 | 说明 | 默认 |
 |------|------|------|
 | `--audio-only` | 跳过屏幕内容分析（仅语音） | 关闭 |
+| `--vision-backend` | 视觉分析后端：`claude`/`qwen`/`ocr`/`auto` | `auto` |
 | `--model` | Whisper 模型：`tiny`/`base`/`small`/`medium`/`large-v3` | `medium` |
 | `--frame-interval N` | 屏幕帧采样间隔（秒） | `30` |
 | `-o OUTPUT` | 输出文件路径 | 打印到 stdout |
+
+**视觉后端说明（`--vision-backend`）**：
+
+| 后端 | 条件 | 质量 |
+|------|------|------|
+| `claude`（推荐） | 需要 `ANTHROPIC_API_KEY`，并发调用 | ★★★★★ |
+| `qwen` | 本地 HuggingFace，无 API key，~8GB RAM | ★★★★☆ |
+| `ocr` | 纯文字 OCR，无 API key，~500MB | ★★★☆☆ |
+| `auto`（默认） | 自动检测：claude → qwen → ocr → skip | — |
 
 **典型命令**（含屏幕共享）：
 ```bash

@@ -54,6 +54,12 @@ SCRIPT=~/.agents/skills/video-to-text/video_to_text.py
 # 语音 + 屏幕内容（完整，推荐含屏幕共享的录制）
 python3 "$SCRIPT" meeting.mp4
 
+# 本地视觉分析（无 API key，Qwen2-VL 本地模型）
+python3 "$SCRIPT" meeting.mp4 --vision-backend qwen
+
+# 纯文字 OCR（无 API key，最轻量）
+python3 "$SCRIPT" meeting.mp4 --vision-backend ocr
+
 # 仅语音（速度快，无 API 费用）
 python3 "$SCRIPT" meeting.mp4 --audio-only
 
@@ -67,6 +73,7 @@ python3 "$SCRIPT" meeting.mp4 --model large-v3
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--audio-only` | off | 跳过屏幕内容分析 |
+| `--vision-backend` | `auto` | 视觉后端：`claude`/`qwen`/`ocr`/`auto`（auto 自动检测最优） |
 | `--model` | `medium` | Whisper 模型：`tiny/base/small/medium/large-v3` |
 | `--frame-interval` | `30` | 屏幕帧采样间隔（秒） |
 | `-o / --output` | stdout | 输出文件路径 |

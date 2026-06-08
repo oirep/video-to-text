@@ -1,14 +1,16 @@
 """
-screen_pipe.py — Keyframe extraction and Claude Vision analysis.
+screen_pipe.py — Keyframe extraction and vision analysis.
 
 Public API:
-  analyze(video_path, frame_interval=30) -> list[ScreenFrame]
+  analyze(video_path, frame_interval=30, backend="auto") -> list[ScreenFrame]
+
+Backends:
+  auto    — Detect best available: claude > qwen > ocr > skip
+  claude  — Claude Vision API (requires ANTHROPIC_API_KEY, concurrent)
+  qwen    — Qwen2-VL-2B-Instruct local model (requires transformers, serial)
+  ocr     — PaddleOCR text extraction (requires paddleocr, serial)
 
 ScreenFrame = {"timestamp": float, "description": str}
-
-Frames are deduplicated by scene change detection. If scene detection
-yields > 3× the fixed-interval count, we fall back to fixed interval.
-Camera-only frames (no screen share) are filtered from the result.
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ VISION_PROMPT = (
     "用中文回答，150字以内。"
 )
 
+# Lazy-loaded globals — shared across frames within a single run
+_qwen_model = None
+_qwen_processor = None
+_ocr_engine = None
+
 
 @dataclass
 class ScreenFrame:
@@ -42,18 +49,80 @@ class ScreenFrame:
         return f"{t//3600:02d}:{(t%3600)//60:02d}:{t%60:02d}"
 
 
-def analyze(video_path: str, frame_interval: int = 30) -> list[ScreenFrame]:
-    """Extract keyframes and analyze each with Claude Vision."""
+def analyze(video_path: str, frame_interval: int = 30, backend: str = "auto") -> list[ScreenFrame]:
+    """Extract keyframes and analyze with the selected vision backend."""
+    if backend == "auto":
+        backend = _auto_backend()
+        print(f"[screen] auto-detected backend: {backend}", flush=True)
+
+    if backend == "skip":
+        print("[screen] No vision backend available. Skipping screen analysis.", flush=True)
+        print("[screen] Set ANTHROPIC_API_KEY or install requirements-local.txt to enable.", flush=True)
+        return []
+
+    _check_backend(backend)
+
     with tempfile.TemporaryDirectory(prefix="vtt-frames-") as frames_dir:
         frames = _extract_frames(video_path, frames_dir, frame_interval)
         if not frames:
             return []
-        results = _analyze_batch(frames)
-    # Filter camera-only frames
+        results = _analyze_batch(frames, backend=backend)
     return [f for f in results if "仅摄像头" not in f.description]
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Backend detection ─────────────────────────────────────────────────────────
+
+def _auto_backend() -> str:
+    """Return best available backend: claude > qwen > ocr > skip."""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "claude"
+    try:
+        import importlib
+        importlib.import_module("transformers")
+        return "qwen"
+    except ImportError:
+        pass
+    try:
+        import importlib
+        importlib.import_module("paddleocr")
+        return "ocr"
+    except ImportError:
+        pass
+    return "skip"
+
+
+def _check_backend(backend: str) -> None:
+    """Raise RuntimeError with install instructions if the backend is unavailable."""
+    if backend == "claude":
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set.\n"
+                "  export ANTHROPIC_API_KEY=sk-ant-...\n"
+                "Or use a local backend: --vision-backend qwen/ocr/auto"
+            )
+    elif backend == "qwen":
+        try:
+            import importlib
+            importlib.import_module("transformers")
+        except ImportError:
+            raise RuntimeError(
+                "Qwen backend requires 'transformers'.\n"
+                "  pip install -r requirements-local.txt\n"
+                "  (~4.7GB model download on first run)"
+            )
+    elif backend == "ocr":
+        try:
+            import importlib
+            importlib.import_module("paddleocr")
+        except ImportError:
+            raise RuntimeError(
+                "OCR backend requires 'paddleocr'.\n"
+                "  pip install paddleocr paddlepaddle\n"
+                "  (~300MB model download on first run)"
+            )
+
+
+# ── Frame extraction ──────────────────────────────────────────────────────────
 
 def _video_duration(video_path: str) -> float:
     r = subprocess.run(
@@ -87,7 +156,6 @@ def _extract_frames(video_path: str, out_dir: str, interval: int) -> list[tuple[
     scene_frames = sorted(Path(scene_dir).glob("f_*.jpg"))
 
     if 0 < len(scene_frames) <= expected_fixed * 3:
-        # Scene detection gave a sensible count — use it with approximate timestamps
         step = duration / max(len(scene_frames), 1)
         return [(i * step, str(p)) for i, p in enumerate(scene_frames)]
 
@@ -104,7 +172,9 @@ def _extract_frames(video_path: str, out_dir: str, interval: int) -> list[tuple[
     return [(i * interval, str(p)) for i, p in enumerate(fixed_frames)]
 
 
-def _analyze_one(timestamp: float, image_path: str) -> ScreenFrame:
+# ── Backend implementations ───────────────────────────────────────────────────
+
+def _analyze_one_claude(timestamp: float, image_path: str) -> ScreenFrame:
     import anthropic
     client = anthropic.Anthropic()
 
@@ -125,15 +195,88 @@ def _analyze_one(timestamp: float, image_path: str) -> ScreenFrame:
     return ScreenFrame(timestamp=timestamp, description=response.content[0].text.strip())
 
 
-def _analyze_batch(frames: list[tuple[float, str]]) -> list[ScreenFrame]:
+def _analyze_one_qwen(timestamp: float, image_path: str) -> ScreenFrame:
+    """Analyze using local Qwen2-VL-2B-Instruct (~4.7GB, loaded once, CPU/GPU)."""
+    global _qwen_model, _qwen_processor
+    from PIL import Image
+    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    import torch
+
+    if _qwen_model is None:
+        print("[screen] Loading Qwen2-VL model (first call: ~30s + ~4.7GB download on first run)...", flush=True)
+        _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen2-VL-2B-Instruct",
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        )
+        _qwen_model.eval()
+        _qwen_processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
+
+    image = Image.open(image_path).convert("RGB")
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text", "text": VISION_PROMPT},
+        ]
+    }]
+    text = _qwen_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = _qwen_processor(text=[text], images=[image], return_tensors="pt")
+
+    with torch.no_grad():
+        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=256)
+
+    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+    output = _qwen_processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    return ScreenFrame(timestamp=timestamp, description=output[0].strip())
+
+
+def _analyze_one_ocr(timestamp: float, image_path: str) -> ScreenFrame:
+    """Extract text using PaddleOCR (CPU-only, no API key required)."""
+    global _ocr_engine
+    from paddleocr import PaddleOCR
+
+    if _ocr_engine is None:
+        _ocr_engine = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+
+    result = _ocr_engine.ocr(image_path, cls=True)
+    if not result or not result[0]:
+        return ScreenFrame(timestamp=timestamp, description="仅摄像头画面")
+
+    texts = [line[1][0] for line in result[0] if line[1][1] > 0.5]
+    if not texts:
+        return ScreenFrame(timestamp=timestamp, description="仅摄像头画面")
+
+    description = "【OCR 文字识别】\n" + "\n".join(texts[:40])
+    return ScreenFrame(timestamp=timestamp, description=description)
+
+
+_BACKENDS = {
+    "claude": _analyze_one_claude,
+    "qwen": _analyze_one_qwen,
+    "ocr": _analyze_one_ocr,
+}
+
+
+def _analyze_batch(frames: list[tuple[float, str]], backend: str = "claude") -> list[ScreenFrame]:
+    _analyze_fn = _BACKENDS[backend]
     results: list[ScreenFrame] = []
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
-        futures = {pool.submit(_analyze_one, ts, path): (ts, path) for ts, path in frames}
-        for future in as_completed(futures):
+
+    if backend in ("qwen", "ocr"):
+        # Serial: qwen model is not thread-safe; ocr uses a single engine instance
+        for ts, path in frames:
             try:
-                results.append(future.result())
+                results.append(_analyze_fn(ts, path))
             except Exception as e:
-                ts, _ = futures[future]
                 print(f"[screen] frame @{ts:.0f}s failed: {e}", flush=True)
+    else:
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
+            futures = {pool.submit(_analyze_fn, ts, path): (ts, path) for ts, path in frames}
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    ts, _ = futures[future]
+                    print(f"[screen] frame @{ts:.0f}s failed: {e}", flush=True)
+
     results.sort(key=lambda f: f.timestamp)
     return results

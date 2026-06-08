@@ -47,6 +47,9 @@ def main() -> None:
     parser.add_argument("input", help="Input video or audio file")
     parser.add_argument("--audio-only", action="store_true",
                         help="Skip screen content analysis (faster)")
+    parser.add_argument("--vision-backend", default="auto",
+                        choices=["claude", "qwen", "ocr", "auto"],
+                        help="Vision backend: claude/qwen/ocr/auto (default: auto)")
     parser.add_argument("--model", default="medium",
                         help="Whisper model: tiny/base/small/medium/large-v3 (default: medium)")
     parser.add_argument("--frame-interval", type=int, default=30,
@@ -78,7 +81,7 @@ def main() -> None:
         if not args.audio_only and not is_audio:
             t1 = time.time()
             print(f"[screen] Analyzing frames (every {args.frame_interval}s) ...", file=sys.stderr)
-            screen = screen_pipe.analyze(args.input, frame_interval=args.frame_interval)
+            screen = screen_pipe.analyze(args.input, frame_interval=args.frame_interval, backend=args.vision_backend)
             print(f"[screen] {len(screen)} screen frames in {time.time()-t1:.1f}s", file=sys.stderr)
 
         # ── Merge & output ────────────────────────────────────────────────────────

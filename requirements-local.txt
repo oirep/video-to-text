@@ -1,0 +1,15 @@
+# Optional local vision backends for --vision-backend qwen or --vision-backend ocr
+# Standard requirements.txt (faster-whisper, anthropic) is unaffected.
+
+# ── Qwen2-VL-2B-Instruct (--vision-backend qwen) ─────────────────────────────
+# Best local Chinese VLM; ~4.7GB model download on first run; 8GB+ RAM required
+transformers>=4.45.0
+torch>=2.1.0
+Pillow>=10.0.0
+# Optional: speeds up model loading
+# accelerate>=0.21.0
+
+# ── PaddleOCR (--vision-backend ocr) ─────────────────────────────────────────
+# Pure text extraction; ~300MB model download on first run; CPU-only
+paddleocr>=2.7.0
+paddlepaddle>=2.6.0
