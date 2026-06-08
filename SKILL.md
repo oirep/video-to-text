@@ -1,7 +1,7 @@
 ---
 name: video-to-text
-version: 1.1.0
-description: "从本地会议视频（MP4/M4A/MOV）提取屏幕共享内容（PPT/代码/白板/表格）并转写语音，输出带时间戳的 Markdown 供 Agent 使用。两种用途：①主动增强 — 当飞书/企微会议有屏幕共享演示时，在 API 文字稿基础上叠加视觉内容；②兜底替代 — 妙记/文档 API 全部失败时，同时提供语音逐字稿 + 屏幕内容。仅摄像头画面（无共享屏幕讲解）时跳过，不增加价值。当用户说「把这个视频转文字」「录制转文本」「分析这个MP4」「提取屏幕内容」「这个会议有屏幕共享」时触发；meeting-context 获取到 API 文字稿后如检测到会议含屏幕共享也应主动建议使用。"
+version: 1.2.0
+description: "将本地会议视频（MP4/M4A/MOV）转换为带时间戳的 Markdown 文字稿。语音识别使用本地 faster-whisper（中文 medium 模型，无需联网），屏幕共享内容（PPT/代码/白板/表格）使用 Claude Vision 分析，两路合并输出。独立工具，不依赖任何其他 skill。当用户说「把这个视频转文字」「录制转文本」「分析这个MP4」「提取屏幕内容」「视频转文字稿」「这个会议有屏幕共享，帮我整理」时触发。会议含屏幕共享演示时最有价值；仅摄像头画面（无共享屏幕讲解）时可跳过。"
 metadata:
   requires:
     bins: ["ffmpeg", "python3"]
@@ -11,22 +11,15 @@ metadata:
 
 # video-to-text
 
-本地视频 → 屏幕内容 + 语音逐字稿（Markdown，带时间戳）。
+本地视频 → 语音逐字稿 + 屏幕内容（Markdown，带时间戳）。
 
 ## 何时使用
 
-| 场景 | 操作 |
+| 场景 | 建议 |
 |------|------|
-| 会议有屏幕共享（PPT 演示、代码 demo、白板、表格讲解） | **主动使用** — 在 API 文字稿基础上叠加屏幕视觉内容，丰富上下文 |
-| 仅摄像头画面、无屏幕内容 | **跳过** — 视觉信息对上下文价值低，不建议跑 |
-| 飞书妙记 API 失败 / 腾讯会议录制（无飞书 API） | **兜底** — 同时提供语音转写 + 屏幕内容 |
-
-**主动使用时的判断依据**（满足任一可建议运行）：
-- 用户提到会议中有演示、PPT 分享、代码展示、白板讨论
-- 会议主题涉及产品评审、技术 demo、数据分析展示等场景
-- 用户说「会议中有屏幕共享」或直接提供了录制文件路径
-
-
+| 会议有屏幕共享（PPT 演示、代码 demo、白板、表格讲解） | **运行** — 语音 + 视觉双通道，内容最完整 |
+| 仅语音、无屏幕共享 | **可选** — 加 `--audio-only`，只输出逐字稿 |
+| 仅摄像头画面、无屏幕内容 | **跳过** — 视觉信息对上下文价值低 |
 
 ## 前置检查
 
@@ -36,7 +29,7 @@ metadata:
 command -v ffmpeg || echo "NOT_INSTALLED"
 ```
 
-未安装时引导用户：
+未安装时：
 ```bash
 brew install ffmpeg   # macOS
 # 或从 https://ffmpeg.org/download.html 下载
@@ -50,34 +43,37 @@ python3 -c "import faster_whisper; print('ok')" 2>&1
 
 若报 ModuleNotFoundError：
 ```bash
-pip install faster-whisper
+pip install -r "$(dirname $0)/requirements.txt"
+# 或单独安装：pip install faster-whisper anthropic
 ```
 
-### 3. 确认 ANTHROPIC_API_KEY
+### 3. 确认 ANTHROPIC_API_KEY（屏幕内容分析用）
 
 ```bash
-echo ${ANTHROPIC_API_KEY:0:10}…   # 只显示前10位，确认已设置
+echo ${ANTHROPIC_API_KEY:0:10}…
 ```
 
-未设置时屏幕内容分析会跳过（仅语音转写）。若需要屏幕内容：
+未设置时屏幕分析会被跳过（仅语音转写）。需要屏幕内容时：
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-…
 ```
 
-### 4. 定位 video_to_text.py
+### 4. 确认脚本路径
 
-按顺序查找，取第一个存在的路径：
+脚本与本 SKILL.md 同目录。安装后路径为：
 
 ```bash
-for p in \
-  ~/leap-bound/leapboundai-workspace/base/tools/video-to-text/video_to_text.py \
-  ~/.agents/tools/video-to-text/video_to_text.py \
-  ~/base/tools/video-to-text/video_to_text.py; do
-  [ -f "$p" ] && echo "$p" && break
-done
+# symlink 安装（推荐）
+~/.agents/skills/video-to-text/video_to_text.py
+
+# npx skills add 安装
+~/.claude/skills/video-to-text/video_to_text.py
 ```
 
-若未找到，提示用户确认 `base` 仓库克隆路径，然后手动指定脚本路径。
+用变量引用，避免硬编码：
+```bash
+SCRIPT="$(dirname "$(realpath ~/.agents/skills/video-to-text/SKILL.md)")/video_to_text.py"
+```
 
 ---
 
@@ -85,18 +81,15 @@ done
 
 ### Step 1：获取视频文件路径
 
-用户应提供本地文件路径（已下载的 MP4/M4A/MOV）。
-
-- 飞书会议录制下载：妙记页面 → 右上角「…」→「下载原始录像」
-- 腾讯会议录制下载：[腾讯会议网页](https://meeting.tencent.com) → 录制管理 → 下载
+用户提供本地文件路径（MP4/M4A/MOV）。常见下载渠道：
+- 飞书会议：妙记页面 → 右上角「…」→「下载原始录像」
+- 腾讯会议：[会议网页](https://meeting.tencent.com) → 录制管理 → 下载
 
 ### Step 2：运行转写
 
 ```bash
 python3 <SCRIPT_PATH> "<VIDEO_PATH>" [OPTIONS]
 ```
-
-常用选项：
 
 | 选项 | 说明 | 默认 |
 |------|------|------|
@@ -105,24 +98,24 @@ python3 <SCRIPT_PATH> "<VIDEO_PATH>" [OPTIONS]
 | `--frame-interval N` | 屏幕帧采样间隔（秒） | `30` |
 | `-o OUTPUT` | 输出文件路径 | 打印到 stdout |
 
-**典型命令**（含屏幕共享的完整会议）：
+**典型命令**（含屏幕共享）：
 ```bash
 python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4"
 ```
 
-**仅语音（速度更快，无 API 费用）**：
+**仅语音**：
 ```bash
 python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4" --audio-only
 ```
 
-**大文件 / 精度要求高（更精准，速度略慢）**：
+**高精度**（方言/专业术语多）：
 ```bash
 python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4" --model large-v3
 ```
 
 ### Step 3：读取并注入输出
 
-脚本输出标准 Markdown，直接注入当前对话上下文：
+输出为标准 Markdown，直接注入对话上下文：
 
 ```markdown
 ## 视频内容 — {文件名} ({时长})
@@ -132,8 +125,6 @@ python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4" --model large-v3
 [00:02:30] 发言人B 的语音内容…
 ```
 
-若脚本将输出写入文件（`-o` 指定或默认 `/tmp/*.md`），用 Read 工具读取后注入。
-
 ---
 
 ## 错误处理
@@ -142,21 +133,21 @@ python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4" --model large-v3
 |------|------|------|
 | `ffmpeg: command not found` | ffmpeg 未安装 | `brew install ffmpeg` |
 | `ModuleNotFoundError: faster_whisper` | pip 包未安装 | `pip install faster-whisper` |
-| 首次运行 Whisper 模型下载缓慢（~1.4GB） | 首次自动下载 medium 模型 | 等待完成，后续复用缓存（~2-5s 加载） |
-| 屏幕内容分析跳过 / `ANTHROPIC_API_KEY not set` | 环境变量未设置 | 设置 API key 后重跑，或用 `--audio-only` 跳过 |
-| `No audio stream found` | 文件无音轨（纯视频或损坏） | 检查文件完整性；可用 `ffprobe` 诊断 |
-| 转写结果乱码 / 语言错误 | 音频非中文或质量差 | 尝试 `--model large-v3`；确认录制质量 |
-| 屏幕内容全部被过滤（`仅摄像头` 判断误杀） | 所有帧被识别为纯摄像头画面 | 增大 `--frame-interval` 减少帧数，或检查视频确认是否真的无屏幕共享 |
+| 首次运行 Whisper 模型下载缓慢（~1.4GB） | 首次自动下载 medium 模型 | 等待完成，后续复用缓存 |
+| `ANTHROPIC_API_KEY not set` / 屏幕分析跳过 | 环境变量未设置 | 设置 key 后重跑，或用 `--audio-only` |
+| `Error: Cannot read audio from '…'` | 非媒体文件或无音轨 | 用 `ffprobe -v error -show_streams <file>` 诊断 |
+| 转写结果乱码 / 语言错误 | 音频质量差或非中文 | 尝试 `--model large-v3` |
+| 屏幕内容全部被过滤 | 所有帧被判定为仅摄像头 | 加大 `--frame-interval`，或确认视频确实有屏幕共享 |
 
 ---
 
-## 性能参考（中文会议录制）
+## 性能参考（中文会议录制，Apple M 系列）
 
-| 场景 | 速度 | 备注 |
+| 场景 | 速度 | 费用 |
 |------|------|------|
-| 30 分钟录制（语音，medium 模型） | ~36 分钟（1.2x 实时） | Apple M 系列 CPU，int8 量化 |
-| 30 分钟录制（含屏幕，30s 帧间隔） | +2-5 分钟 | 60 帧并发分析，~$0.03-0.05 |
-| 30 分钟录制（large-v3 模型） | ~60-90 分钟 | 精度更高，适合方言/专业术语 |
+| 30 分钟（语音，medium 模型） | ~36 分钟（1.2x 实时） | $0 |
+| 30 分钟（含屏幕，30s 帧间隔） | +2-5 分钟 | ~$0.03-0.05 |
+| 30 分钟（large-v3 模型） | ~60-90 分钟 | $0 |
 
 ---
 
@@ -169,6 +160,6 @@ python3 <SCRIPT_PATH> "/Users/me/Downloads/meeting.mp4" --model large-v3
 用户: 分析这个会议录制，里面有屏幕共享
       ~/Downloads/meeting-2026-06-03.mp4
 
-用户: 这个视频只需要语音，不要屏幕内容
-      [文件路径] --audio-only
+用户: 这个视频只需要语音
+      ~/Downloads/meeting.mp4 --audio-only
 ```

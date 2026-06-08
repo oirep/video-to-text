@@ -1,57 +1,81 @@
 # video-to-text
 
-> 一个 Claude Code **视频转文字 skill**：给一个本地会议录制文件（MP4/M4A/MOV），自动用本地 Whisper 转写语音、用 Claude Vision 分析屏幕共享内容（PPT/代码/白板），输出带时间戳的完整 Markdown 文字稿，直接注入对话上下文。
+将会议录制视频（含屏幕共享）转换为带时间戳的 Markdown 文字稿。
 
-适用于：飞书妙记 API 失败时的兜底、腾讯会议录制（无飞书 API）、含屏幕共享需要视觉内容的录制。
+- **语音逐字稿**：本地 `faster-whisper`（中文 medium 模型，无需联网）
+- **屏幕共享内容**：ffmpeg 关键帧 + Claude Vision（PPT、代码、白板、表格）
+- **合并输出**：语音与屏幕内容按时间线交织
+
+独立工具，不依赖其他 skill。可与 `meeting-context` 配合使用（API 文字稿 + 视觉内容双通道）。
 
 ---
 
 ## 安装
 
-**若有 `kevinw99/base` 读权限（内部协作者，始终拿最新版）：**
-
+**symlink（推荐，SSoT 始终最新）：**
 ```bash
-npx skills add kevinw99/base --path skills/video-to-text
+ln -s /path/to/leapboundai-workspace/base/skills/video-to-text ~/.agents/skills/video-to-text
 ```
 
 **公开镜像（无内部权限时）：**
-
 ```bash
 npx skills add oirep/video-to-text
 ```
 
----
-
-## 依赖
-
-| 工具 | 用途 | 安装 |
-|------|------|------|
-| `ffmpeg` | 音频提取 + 关键帧截取 | `brew install ffmpeg` |
-| `faster-whisper` | 本地语音识别（中文 medium 模型）| `pip install faster-whisper` |
-| `ANTHROPIC_API_KEY` | 屏幕内容 Claude Vision 分析 | 设置环境变量 |
-
-**工具脚本**（需本地克隆）：`base/tools/video-to-text/video_to_text.py`
-
+**内部协作者：**
 ```bash
-# 克隆 base 仓库后安装依赖
-git clone https://github.com/kevinw99/base.git
-pip install -r base/tools/video-to-text/requirements.txt
+npx skills add kevinw99/base --path skills/video-to-text
 ```
 
 ---
 
-## 使用
+## 依赖安装
 
-触发词：「把这个视频转文字」「录制转文本」「分析这个MP4」  
-提供本地录制文件路径，Claude 会自动完成所有步骤。
+```bash
+# 运行时依赖
+brew install ffmpeg
+pip install -r requirements.txt
+```
 
-详细步骤见 [SKILL.md](SKILL.md)。
+| 依赖 | 用途 |
+|------|------|
+| `ffmpeg` | 音频提取 + 关键帧截取 |
+| `faster-whisper` | 本地语音识别 |
+| `anthropic` | Claude Vision 屏幕内容分析 |
+| `ANTHROPIC_API_KEY` | 屏幕分析（不需要时可跳过） |
 
 ---
 
-## 性能参考
+## 用法
 
-| 场景 | 速度 |
-|------|------|
-| 30 分钟会议（语音，medium 模型） | ~36 分钟（1.2x 实时） |
-| 30 分钟会议（含屏幕共享） | +2-5 分钟，~$0.03-0.05 API 费用 |
+```bash
+SCRIPT=~/.agents/skills/video-to-text/video_to_text.py
+
+# 语音 + 屏幕内容（完整，推荐含屏幕共享的录制）
+python3 "$SCRIPT" meeting.mp4
+
+# 仅语音（速度快，无 API 费用）
+python3 "$SCRIPT" meeting.mp4 --audio-only
+
+# 输出到文件
+python3 "$SCRIPT" meeting.mp4 -o output.md
+
+# 高精度模型
+python3 "$SCRIPT" meeting.mp4 --model large-v3
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--audio-only` | off | 跳过屏幕内容分析 |
+| `--model` | `medium` | Whisper 模型：`tiny/base/small/medium/large-v3` |
+| `--frame-interval` | `30` | 屏幕帧采样间隔（秒） |
+| `-o / --output` | stdout | 输出文件路径 |
+
+---
+
+## 性能参考（Apple M 系列，30 分钟录制）
+
+| 场景 | 耗时 | API 费用 |
+|------|------|---------|
+| 仅语音，medium 模型 | ~36 分钟 | $0 |
+| 语音 + 屏幕（30s 帧间隔） | ~40 分钟 | ~$0.03-0.05 |
